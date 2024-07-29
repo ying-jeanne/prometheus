@@ -29,8 +29,6 @@ import (
 	"sort"
 	"unsafe"
 
-	"golang.org/x/exp/maps"
-
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
@@ -1558,107 +1556,65 @@ type InfoMetricSampleQuerier interface {
 	LatestTimestamp(t int64, chks []chunks.Meta) (int64, error)
 }
 
+// InfoMetricDataLabels returns the data labels for the most recent info metric corresponding to lbls.
 func (r *Reader) InfoMetricDataLabels(ctx context.Context, lbls labels.Labels, t int64, sq InfoMetricSampleQuerier, matchers ...*labels.Matcher) (labels.Labels, annotations.Annotations, error) {
 	// For this prototype, we support only the target_info metric.
 	// Find corresponding series.
 
-	// Search for target_info postings.
+	// Search postings with __name__="target_info", instance and job labels corresponds to lbls.
 	p, err := r.Postings(ctx, labels.MetricName, "target_info")
 	if err != nil {
 		return labels.Labels{}, nil, err
 	}
-	infoSrs := map[storage.SeriesRef]map[string]struct{}{}
-	for p.Next() {
-		infoSrs[p.At()] = map[string]struct{}{}
-	}
-	if p.Err() != nil {
-		return labels.Labels{}, nil, err
-	}
-	if len(infoSrs) == 0 {
-		// There are no target_info series.
-		return labels.Labels{}, nil, err
-	}
 
-	lblMap := lbls.Map()
-	// Given that we have target_info's series refs, first find those series with identifying labels matching lblMap.
+	// We find find those series with identifying labels matching lblMap.
 	// When we have filtered it down to those series, we can pick their (matching) data labels.
+	lblMap := lbls.Map()
+
 	instanceVal := lblMap["instance"]
 	hasInstance := instanceVal != ""
-	p, err = r.Postings(ctx, "instance", instanceVal)
-	if err != nil {
-		return labels.Labels{}, nil, err
-	}
-	for p.Next() {
-		sr := p.At()
-		if _, exists := infoSrs[sr]; !exists {
-			continue
+	if hasInstance {
+		p1, err := r.Postings(ctx, "instance", instanceVal)
+		if err != nil {
+			return labels.Labels{}, nil, err
 		}
-		// This series' instance label matches.
-		infoSrs[sr]["instance"] = struct{}{}
-	}
-	if p.Err() != nil {
-		return labels.Labels{}, nil, err
-	}
-	jobVal := lblMap["job"]
-	hasJob := jobVal != ""
-	p, err = r.Postings(ctx, "job", jobVal)
-	if err != nil {
-		return labels.Labels{}, nil, err
-	}
-	for p.Next() {
-		sr := p.At()
-		if _, exists := infoSrs[sr]; !exists {
-			continue
-		}
-		// This series' job label matches.
-		infoSrs[sr]["job"] = struct{}{}
-	}
-	if p.Err() != nil {
-		return labels.Labels{}, nil, err
+		p = Intersect(p1, p)
 	}
 
-	// Keep info series where both identifying labels match corresponding labels in lbls.
-	for sr, m := range infoSrs {
-		_, infoHasInstance := m["instance"]
-		_, infoHasJob := m["job"]
-		if infoHasInstance != hasInstance || infoHasJob != hasJob {
-			// This candidate didn't match both identifying labels.
-			delete(infoSrs, sr)
+	jobVal := lblMap["job"]
+	hasJob := jobVal != ""
+	if hasJob {
+		p1, err := r.Postings(ctx, "job", jobVal)
+		if err != nil {
+			return labels.Labels{}, nil, err
 		}
-	}
-	if len(infoSrs) == 0 {
-		return labels.Labels{}, nil, err
+		p = Intersect(p1, p)
 	}
 
 	// Pick the most up to date matching info series.
 	lb := labels.NewScratchBuilder(0)
 	var infoLbls labels.Labels
-	if len(infoSrs) > 1 {
-		// Resolve conflict by picking the series with the newest sample <= t.
-		maxT := int64(0)
-
-		var chks []chunks.Meta
-		for sr := range infoSrs {
-			lb.Reset()
-			if err := r.Series(sr, &lb, &chks); err != nil {
-				return labels.Labels{}, nil, err
-			}
-			srT, err := sq.LatestTimestamp(t, chks)
-			if err != nil {
-				return labels.Labels{}, nil, err
-			}
-
-			if srT > maxT {
-				maxT = srT
-				infoLbls = lb.Labels()
-			}
-		}
-	} else {
-		infoSr := maps.Keys(infoSrs)[0]
-		if err := r.Series(infoSr, &lb, nil); err != nil {
+	maxT := int64(0)
+	var chks []chunks.Meta
+	for p.Next() {
+		lb.Reset()
+		if err := r.Series(p.At(), &lb, &chks); err != nil {
 			return labels.Labels{}, nil, err
 		}
-		infoLbls = lb.Labels()
+		srT, err := sq.LatestTimestamp(t, chks)
+		if err != nil {
+			return labels.Labels{}, nil, err
+		}
+
+		if srT > maxT {
+			maxT = srT
+			infoLbls = lb.Labels()
+		}
+	}
+
+	// No info series found.
+	if infoLbls.IsEmpty() {
+		return labels.Labels{}, nil, nil
 	}
 
 	// Pick info metric data labels.
