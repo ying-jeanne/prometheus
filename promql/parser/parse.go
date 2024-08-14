@@ -798,7 +798,7 @@ func (p *parser) checkAST(node Node) (typ ValueType) {
 
 		if n.Func.Name == "info" && len(n.Args) > 1 {
 			if n.Args[1].(*VectorSelector).Name != "" {
-				p.addParseErrf(n.Args[1].PositionRange(), "expected lable selectors only, got vector selector instead.")
+				p.addParseErrf(n.Args[1].PositionRange(), "expected label selectors as the second argument to \"info\" function.")
 			}
 		}
 
