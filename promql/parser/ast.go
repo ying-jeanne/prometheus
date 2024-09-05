@@ -211,7 +211,8 @@ type VectorSelector struct {
 	// SelectHints are the SelectHints to use when selecting corresponding info series, if enabled.
 	SelectHints *storage.SelectHints
 
-	PosRange posrange.PositionRange
+	PosRange                posrange.PositionRange
+	BypassEmptyMatcherCheck bool
 }
 
 // TestStmt is an internal helper statement that allows execution
